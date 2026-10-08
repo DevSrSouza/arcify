@@ -48,6 +48,7 @@ import {
     handleEmptyContainerDrop
 } from './domManager.js';
 import { BookmarkUtils } from './bookmark-utils.js';
+import { SPLIT_VIEW_ID_NONE, supportsSplitView, isSplitDropZone, placeAfter, splitTabs, applySplitViewClasses } from './split-view.js';
 import { Logger } from './logger.js';
 import { MOUSE_BUTTON, CSS_CLASSES, TIMING } from './constants.js';
 
@@ -564,6 +565,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
         handleTabUpdate(tabId, changeInfo, tab);
         if (tab.pinned) updatePinnedFavicons(); // Update favicons when a tab is pinned/unpinned
+        if (changeInfo.splitViewId !== undefined) handleSplitViewChange(tab);
     });
     chrome.tabs.onRemoved.addListener(handleTabRemove);
     const refreshWindowTabs = async (_tabId, info) => {
@@ -1257,6 +1259,7 @@ function setupTabDragHandlers(tabElement) {
     tabElement.addEventListener('dragend', () => {
         isDraggingTab = false;
         tabElement.classList.remove('dragging');
+        clearSplitDropTarget();
         dragSourceFolderElement = null;
         refreshCoordinator.schedule();
     });
@@ -1933,6 +1936,7 @@ async function setupDragAndDrop(pinnedContainer, tempContainer) {
     [pinnedContainer, tempContainer].forEach(container => {
         container.addEventListener('dragover', e => {
             e.preventDefault();
+            if (showSplitDropTarget(e)) return;
             const draggingElement = document.querySelector('.dragging');
             if (draggingElement) {
                 const targetFolder = e.target.closest('.folder')?.querySelector(':scope > .folder-content');
@@ -1983,6 +1987,7 @@ async function setupDragAndDrop(pinnedContainer, tempContainer) {
             // Only hide indicators if we're actually leaving the container (not moving to a child)
             if (!container.contains(e.relatedTarget)) {
                 hideAllDropIndicators();
+                clearSplitDropTarget();
                 // Remove any placeholder drag-over state in this container
                 const placeholder = container.querySelector('.tab-placeholder');
                 if (placeholder) placeholder.classList.remove('drag-over');
@@ -1995,6 +2000,7 @@ async function setupDragAndDrop(pinnedContainer, tempContainer) {
         container.addEventListener('drop', async e => {
             e.preventDefault();
             hideAllDropIndicators();
+            if (await dropIntoSplitView(e)) return;
             // Remove any placeholder drag-over state in this container
             const placeholder = container.querySelector('.tab-placeholder');
             if (placeholder) placeholder.classList.remove('drag-over');
@@ -2091,6 +2097,75 @@ async function setupDragAndDrop(pinnedContainer, tempContainer) {
             }
         });
     });
+}
+
+function findSplitDropTarget(event) {
+    if (!supportsSplitView()) return null;
+    const dragging = document.querySelector('.tab.dragging[data-tab-id]');
+    const target = event.target.closest('.tab[data-tab-id]');
+    if (!dragging || !target || target === dragging) return null;
+    if (dragging.dataset.splitViewId || target.dataset.splitViewId) return null;
+    return isSplitDropZone(target.getBoundingClientRect(), event.clientY) ? target : null;
+}
+
+function clearSplitDropTarget() {
+    document.querySelectorAll('.split-drop-target').forEach(el => el.classList.remove('split-drop-target'));
+}
+
+function showSplitDropTarget(event) {
+    const target = findSplitDropTarget(event);
+    if (target?.classList.contains('split-drop-target')) return true;
+    clearSplitDropTarget();
+    if (!target) return false;
+    hideAllDropIndicators();
+    target.classList.add('split-drop-target');
+    return true;
+}
+
+async function dropIntoSplitView(event) {
+    const target = findSplitDropTarget(event);
+    clearSplitDropTarget();
+    if (!target) return false;
+    const draggedId = Number(document.querySelector('.tab.dragging').dataset.tabId);
+    const targetId = Number(target.dataset.tabId);
+    try {
+        await splitTabs(draggedId, targetId);
+        await Utils.focusTab(targetId);
+    } catch (error) {
+        Logger.warn('Split view could not be created:', error);
+        alert(error.message);
+    }
+    return true;
+}
+
+async function decorateSplitViews() {
+    if (!currentWindow) return;
+    const tabs = await chrome.tabs.query({ windowId: currentWindow.id });
+    applySplitViewClasses(document, new Map(tabs.map(tab => [tab.id, tab.splitViewId ?? SPLIT_VIEW_ID_NONE])));
+}
+
+async function keepSplitPartnersAdjacent(splitViewId) {
+    const pair = await chrome.tabs.query({ splitViewId });
+    if (pair.length !== 2) return false;
+    const [left, right] = pair.sort((a, b) => a.index - b.index);
+    const space = ownerOf(spaces, left.id);
+    if (!space || space !== ownerOf(spaces, right.id)) return false;
+    const temporaryTabs = placeAfter(space.temporaryTabs, left.id, right.id);
+    if (temporaryTabs === space.temporaryTabs) return false;
+    space.temporaryTabs = temporaryTabs;
+    await saveSpaces();
+    return true;
+}
+
+async function handleSplitViewChange(tab) {
+    if (tab.windowId !== currentWindow?.id) return;
+    try {
+        const reordered = tab.splitViewId !== SPLIT_VIEW_ID_NONE && await keepSplitPartnersAdjacent(tab.splitViewId);
+        if (reordered) await refreshActiveSpaceUI();
+        else await decorateSplitViews();
+    } catch (error) {
+        Logger.warn('Split view state could not be shown:', error);
+    }
 }
 
 // Function to set up drag and drop for placeholder containers to make entire placeholder area droppable
@@ -2534,6 +2609,7 @@ async function refreshActiveSpaceUI({ force = false } = {}) {
 
         if (await loadTabs(space, pinnedContainer, tempContainer) === false) return false;
         updatePinnedSectionPlaceholders();
+        await decorateSplitViews();
 
         // Restore active highlight if possible
         const activeTabs = await chrome.tabs.query({ active: true, currentWindow: true });

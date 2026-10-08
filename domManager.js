@@ -16,6 +16,7 @@ import { firstUnusedColor } from './space-colors.js';
 import { Utils } from './utils.js';
 import { RESTORE_ICON } from './icons.js';
 import { Logger } from './logger.js';
+import { SPLIT_VIEW_ID_NONE, supportsSplitView, splitWithActiveTab, separateSplit } from './split-view.js';
 
 // DOM Elements
 const spacesList = document.getElementById('spacesList');
@@ -183,6 +184,27 @@ export function activateSpaceInDOM(spaceId, spaces, updateSpaceSwitcher) {
     updateSpaceSwitcher();
 }
 
+function appendSplitViewOption(contextMenu, tab, tabElement) {
+    if (!supportsSplitView()) return;
+    const splitViewId = Number(tabElement.dataset.splitViewId ?? SPLIT_VIEW_ID_NONE);
+    const isSplit = splitViewId !== SPLIT_VIEW_ID_NONE;
+    if (!isSplit && tabElement.classList.contains('active')) return;
+    const option = document.createElement('div');
+    option.className = 'context-menu-item';
+    option.textContent = isSplit ? 'Separate Views' : 'Split with Current Tab';
+    option.addEventListener('click', async () => {
+        contextMenu.remove();
+        try {
+            if (isSplit) await separateSplit(splitViewId);
+            else await splitWithActiveTab(tab.id);
+        } catch (error) {
+            Logger.warn('[ContextMenu] Split view action failed:', error);
+            alert(error.message);
+        }
+    });
+    contextMenu.appendChild(option);
+}
+
 export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabElement, closeTab, spaces, moveTabToSpace, setActiveSpace, allBookmarkSpaceFolders, createSpaceFromInactive, onReplaceBookmarkUrlWithCurrent = null) {
     // Remove any existing context menus
     const existingMenu = document.getElementById('tab-context-menu');
@@ -218,6 +240,7 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
             contextMenu.remove();
         });
         contextMenu.appendChild(pinInSpaceOption);
+        appendSplitViewOption(contextMenu, tab, tabElement);
 
         // Arc-like: allow updating the underlying space bookmark URL to the current tab URL.
         if (isPinned && typeof onReplaceBookmarkUrlWithCurrent === 'function') {
